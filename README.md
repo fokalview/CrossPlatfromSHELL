@@ -44,6 +44,4 @@ shell_project/
 * **Better error messages and logging**
 * **Unit tests and CI pipeline**
 
-## 📄 License
 
-This project is open-source and available under the [MIT License](LICENSE).
