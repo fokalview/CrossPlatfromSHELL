@@ -1,0 +1,177 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <sys/time.h>
+#include <sys/resource.h>
+#include <errno.h>
+
+#define MAX_INPUT 128
+#define MAX_ARGS 32
+#define MAX_JOBS 10
+
+typedef struct {
+    pid_t pid;
+    char cmd[MAX_INPUT];
+} Job;
+
+Job background_jobs[MAX_JOBS];
+int job_count = 0;
+
+/* Run command with resource stats */
+void execute_command(char *args[], int run_in_background) {
+    struct timeval start, end;
+    struct rusage usage;
+    pid_t pid;
+    int status;
+
+    gettimeofday(&start, NULL);
+
+    if ((pid = fork()) < 0) {
+        perror("fork");
+        return;
+    }
+
+    if (pid == 0) {
+        execvp(args[0], args);
+        perror("execvp");
+        exit(EXIT_FAILURE);
+    } else {
+        if (!run_in_background) {
+            waitpid(pid, &status, 0);
+            gettimeofday(&end, NULL);
+            getrusage(RUSAGE_CHILDREN, &usage);
+
+            long elapsed_ms = (end.tv_sec - start.tv_sec) * 1000 + 
+                              (end.tv_usec - start.tv_usec) / 1000;
+            long user_ms = usage.ru_utime.tv_sec * 1000 + usage.ru_utime.tv_usec / 1000;
+            long sys_ms = usage.ru_stime.tv_sec * 1000 + usage.ru_stime.tv_usec / 1000;
+
+            printf("\nCommand execution statistics:\n");
+            printf("--------------------------------\n");
+            printf("User CPU time:         %6ld ms\n", user_ms);
+            printf("System CPU time:       %6ld ms\n", sys_ms);
+            printf("Elapsed time:          %6ld ms\n", elapsed_ms);
+            printf("Minor page faults:     %6ld\n", usage.ru_minflt);
+            printf("Major page faults:     %6ld\n", usage.ru_majflt);
+            printf("Voluntary switches:    %6ld\n", usage.ru_nvcsw);
+            printf("Involuntary switches:  %6ld\n", usage.ru_nivcsw);
+            printf("Max resident set size: %6ld KB\n", usage.ru_maxrss);
+            printf("--------------------------------\n");
+        } else {
+            if (job_count < MAX_JOBS) {
+                background_jobs[job_count].pid = pid;
+                strncpy(background_jobs[job_count].cmd, args[0], MAX_INPUT - 1);
+                printf("[%d] %d\n", job_count + 1, pid);
+                job_count++;
+            } else {
+                printf("Maximum background jobs reached\n");
+            }
+        }
+    }
+}
+
+/* Non-blocking check for finished background jobs */
+void check_background_jobs() {
+    for (int i = 0; i < job_count; i++) {
+        int status;
+        pid_t result = waitpid(background_jobs[i].pid, &status, WNOHANG);
+
+        if (result > 0) {
+            printf("[%d] %d Completed: %s\n", i + 1, background_jobs[i].pid, background_jobs[i].cmd);
+            for (int j = i; j < job_count - 1; j++) {
+                background_jobs[j] = background_jobs[j + 1];
+            }
+            job_count--;
+            i--;
+        }
+    }
+}
+
+/* Main shell loop */
+void interactive_shell() {
+    char input[MAX_INPUT];
+    char *args[MAX_ARGS];
+    char prompt[32] = "==>";  // default prompt
+
+    while (1) {
+        check_background_jobs();
+
+        printf("%s ", prompt);
+        fflush(stdout);
+
+        if (fgets(input, MAX_INPUT, stdin) == NULL) {
+            printf("\n");
+            break;
+        }
+
+        input[strcspn(input, "\n")] = '\0';  // remove newline
+        if (strlen(input) == 0) continue;
+
+        // Handle set prompt = ...
+        if (strncmp(input, "set prompt =", 12) == 0) {
+            char *newprompt = input + 12;
+            while (*newprompt == ' ') newprompt++;
+            strncpy(prompt, newprompt, sizeof(prompt) - 1);
+            prompt[sizeof(prompt) - 1] = '\0';
+            continue;
+        }
+
+        int arg_count = 0;
+        char *token = strtok(input, " ");
+        while (token != NULL && arg_count < MAX_ARGS - 1) {
+            args[arg_count++] = token;
+            token = strtok(NULL, " ");
+        }
+        args[arg_count] = NULL;
+
+        if (arg_count == 0) continue;
+
+        int background = 0;
+        if (strcmp(args[arg_count - 1], "&") == 0) {
+            background = 1;
+            args[arg_count - 1] = NULL;
+            arg_count--;
+        }
+
+        if (strcmp(args[0], "exit") == 0) {
+            while (job_count > 0) {
+                int status;
+                pid_t pid = wait(&status);
+                for (int i = 0; i < job_count; i++) {
+                    if (background_jobs[i].pid == pid) {
+                        printf("[%d] %d Completed: %s\n", i + 1, pid, background_jobs[i].cmd);
+                        for (int j = i; j < job_count - 1; j++) {
+                            background_jobs[j] = background_jobs[j + 1];
+                        }
+                        job_count--;
+                        break;
+                    }
+                }
+            }
+            break;
+        } else if (strcmp(args[0], "cd") == 0) {
+            if (args[1] == NULL) {
+                fprintf(stderr, "cd: missing argument\n");
+            } else if (chdir(args[1]) != 0) {
+                perror("cd");
+            }
+        } else if (strcmp(args[0], "jobs") == 0) {
+            for (int i = 0; i < job_count; i++) {
+                printf("[%d] %d %s\n", i + 1, background_jobs[i].pid, background_jobs[i].cmd);
+            }
+        } else {
+            execute_command(args, background);
+        }
+    }
+}
+
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        interactive_shell();
+    } else {
+        execute_command(&argv[1], 0);
+    }
+    return 0;
+}
